@@ -1,0 +1,8 @@
+.dbt_profiles/
+     target/
+     dbt_modules/
+     logs/
+     .idea/
+     *.iml
+     *.pyc
+     __pycache__/
