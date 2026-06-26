@@ -1,8 +1,21 @@
-.dbt_profiles/
-     target/
-     dbt_modules/
-     logs/
-     .idea/
-     *.iml
-     *.pyc
-     __pycache__/
+# Python virtual environment
+dbt_env/
+__pycache__/
+*.pyc
+
+# dbt
+target/
+dbt_packages/
+dbt_modules/
+logs/
+
+# SECRETS — never commit these
+profiles.yml
+*.p8
+*.pem
+rsa_key*
+
+# Editor
+.idea/
+*.iml
+.vscode/
