@@ -63,7 +63,7 @@ with DAG(
 ) as dag:
 
     # ── SENSOR: only proceed if new files arrived in the last 15 min ──
-    @task.sensor(poke_interval=60, timeout=300, mode="reschedule")
+    @task.sensor(poke_interval=60, timeout=300, mode="reschedule", soft_fail=True)
     def wait_for_new_files():
         s = _snowflake_session()
         try:
