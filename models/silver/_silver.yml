@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: stg_admissions
+    description: "Silver: cleaned admissions with dedup, sequencing, readmission, DQ"
+    columns:
+      - name: admission_id
+        description: "Primary key"
+        tests: [unique, not_null]
+      - name: patient_id
+        tests: [not_null]
+      - name: admission_type
+        tests:
+          - accepted_values:
+              values: ['Emergency', 'Urgent', 'Elective', 'Unknown']
+      - name: dq_status
+        tests:
+          - accepted_values:
+              values: ['VALID','OVERLAPPING_ADMISSION','INVALID_NEGATIVE_LOS','INVALID_EXCESSIVE_LOS','INVALID_FUTURE_DATE','MISSING_DOCTOR','MISSING_HOSPITAL']
+
+  - name: stg_treatments
+    columns:
+      - name: treatment_id
+        tests: [unique, not_null]
+      - name: outcome
+        tests:
+          - accepted_values:
+              values: ['Success','Partial','Failed','Unknown']
+
+  - name: stg_claims
+    columns:
+      - name: claim_id
+        tests: [unique, not_null]
+      - name: claim_status
+        tests:
+          - accepted_values:
+              values: ['Approved','Rejected','Pending','Unknown']

@@ -1,0 +1,71 @@
+version: 2
+
+models:
+  - name: dim_doctor
+    columns:
+      - name: doctor_sk
+        tests: [unique, not_null]
+      - name: doctor_id
+        tests: [unique, not_null]
+      - name: seniority_band
+        tests:
+          - accepted_values:
+              values: ['Junior','Mid-level','Senior','Unknown']
+
+  - name: dim_hospital
+    columns:
+      - name: hospital_sk
+        tests: [unique, not_null]
+
+  - name: dim_insurance
+    columns:
+      - name: insurance_sk
+        tests: [unique, not_null]
+
+  - name: dim_patient
+    columns:
+      - name: patient_sk
+        tests: [unique, not_null]
+
+  - name: dim_date
+    columns:
+      - name: date_sk
+        tests: [unique, not_null]
+      - name: date_day
+        tests: [unique, not_null]
+
+  - name: fct_admissions
+    columns:
+      - name: admission_id
+        tests: [unique, not_null]
+      - name: doctor_sk
+        description: "Referential integrity → dim_doctor"
+        tests:
+          - relationships:
+              to: ref('dim_doctor')
+              field: doctor_sk
+      - name: hospital_sk
+        tests:
+          - relationships:
+              to: ref('dim_hospital')
+              field: hospital_sk
+
+  - name: fct_treatments
+    columns:
+      - name: treatment_id
+        tests: [unique, not_null]
+      - name: doctor_sk
+        tests:
+          - relationships:
+              to: ref('dim_doctor')
+              field: doctor_sk
+
+  - name: fct_claims
+    columns:
+      - name: claim_id
+        tests: [unique, not_null]
+      - name: insurance_sk
+        tests:
+          - relationships:
+              to: ref('dim_insurance')
+              field: insurance_sk

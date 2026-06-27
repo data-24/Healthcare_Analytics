@@ -19,3 +19,14 @@ rsa_key*
 .idea/
 *.iml
 .vscode/
+# Airflow secrets + runtime
+**/.env
+.env
+airflow/keys/
+airflow/logs/
+airflow/plugins/
+airflow/config/
+
+# Big source + test data (goes to S3, not git)
+*.csv
+!seeds/*.csv

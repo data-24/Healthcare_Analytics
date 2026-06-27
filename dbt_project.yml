@@ -1,17 +1,31 @@
 name: 'healthcare_analytics'
 version: '1.0.0'
 config-version: 2
+profile: 'healthcare_analytics'
 
-profile: healthcare_analytics
-
-source-paths: ["models"]
-analysis-paths: ["analysis"]
-test-paths: ["tests"]
-data-paths: ["data"]
-macro-paths: ["macros"]
+model-paths:    ["models"]
+seed-paths:     ["seeds"]
+macro-paths:    ["macros"]
 snapshot-paths: ["snapshots"]
+test-paths:     ["tests"]
+clean-targets:  ["target", "dbt_packages"]
 
-target-path: "target"
-clean-targets:
-  - "target"
-  - "dbt_modules"
+models:
+  healthcare_analytics:
+    silver:
+      +materialized: view
+      +schema: staging
+    gold:
+      +materialized: table
+      +schema: marts
+
+seeds:
+  healthcare_analytics:
+    +schema: raw
+    seed_doctors:   {+column_types: {doctor_id: varchar(5), years_experience: integer}}
+    seed_hospitals: {+column_types: {hospital_id: varchar(5)}}
+    seed_insurers:  {+column_types: {insurance_id: varchar(5)}}
+
+snapshots:
+  healthcare_analytics:
+    +target_schema: snapshots
