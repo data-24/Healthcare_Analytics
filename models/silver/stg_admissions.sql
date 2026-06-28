@@ -5,9 +5,36 @@
 -- done reliably/cheaply in Bronze or a BI tool.
 -- ════════════════════════════════════════════════════════════════════
 
-with source as (
+with snowpipe_admissions as (
 
-    select * from {{ source('bronze', 'patient_admissions') }}
+    select
+        admission_id, patient_id, doctor_id, hospital_id, admit_date,
+        department, admission_type, diagnosis_code, length_of_stay,
+        readmission_flag, file_name, upload_dttm, load_dttm,
+        'SNOWPIPE' as source_system
+    from {{ source('bronze', 'patient_admissions') }}
+
+),
+
+gatekeeper_admissions as (
+
+    select
+        admission_id, patient_id, doctor_id, hospital_id, admit_date,
+        department, admission_type, diagnosis_code, length_of_stay,
+        readmission_flag, file_name,
+        upload_dttm,
+        load_dttm,
+        'GATEKEEPER' as source_system
+    from {{ source('bronze', 'gk_patient_admissions') }}
+
+
+),
+
+source as (
+
+    select * from snowpipe_admissions
+    union all
+    select * from gatekeeper_admissions
 
 ),
 
@@ -47,7 +74,7 @@ cleaned as (
         cast(readmission_flag as boolean) as source_readmission_flag,
 
         -- lineage carried forward
-        file_name, upload_dttm, load_dttm
+        file_name, upload_dttm, load_dttm, source_system
 
     from deduplicated
     where _row_num = 1          -- keep only the latest row per admission
@@ -130,7 +157,7 @@ final as (
         end as is_valid,
 
         -- lineage
-        file_name, upload_dttm, load_dttm
+        file_name, upload_dttm, load_dttm, source_system
 
     from sequenced
 

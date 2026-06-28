@@ -1,12 +1,38 @@
 -- ════════════════════════════════════════════════════════════════════
 -- stg_treatments (SILVER)
+-- Unions Snowpipe + Gatekeeper treatments. Parses text dates (Bronze
+-- stores dates as raw text; Silver converts them - medallion principle).
 -- Complex logic: dedup, outcome decode, per-admission cost context,
 -- and STATISTICAL outlier detection (cost z-score per procedure).
 -- ════════════════════════════════════════════════════════════════════
 
-with source as (
+with snowpipe_treatments as (
 
-    select * from {{ source('bronze', 'treatment_records') }}
+    select
+        treatment_id, admission_id, doctor_id, procedure_code,
+        treatment_date::varchar as treatment_date, cost, outcome,
+        file_name, upload_dttm, load_dttm,
+        'SNOWPIPE' as source_system
+    from {{ source('bronze', 'treatment_records') }}
+
+),
+
+gatekeeper_treatments as (
+
+    select
+        treatment_id, admission_id, doctor_id, procedure_code,
+        treatment_date::varchar as treatment_date, cost, outcome,
+        file_name, upload_dttm, load_dttm,
+        'GATEKEEPER' as source_system
+    from {{ source('bronze', 'gk_treatment_records') }}
+
+),
+
+source as (
+
+    select * from snowpipe_treatments
+    union all
+    select * from gatekeeper_treatments
 
 ),
 
@@ -25,7 +51,13 @@ cleaned as (
         admission_id,
         upper(trim(doctor_id))      as doctor_id,
         upper(trim(procedure_code)) as procedure_code,
-        treatment_date,
+
+        -- parse text date (handles YYYY-MM-DD and DD/MM/YYYY)
+        coalesce(
+            try_to_date(treatment_date, 'YYYY-MM-DD'),
+            try_to_date(treatment_date, 'DD/MM/YYYY')
+        ) as treatment_date,
+
         cost,
 
         case upper(trim(outcome))
@@ -35,6 +67,7 @@ cleaned as (
             else 'Unknown'
         end as outcome,
 
+        source_system,
         file_name, upload_dttm, load_dttm
     from deduplicated
     where _row_num = 1
@@ -98,6 +131,7 @@ final as (
             else 'VALID'
         end as dq_status,
 
+        source_system,
         file_name, upload_dttm, load_dttm
     from stats
 )

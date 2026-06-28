@@ -5,13 +5,20 @@ sources:
     database: HEALTHCARE_DB
     schema: RAW
     description: "Raw layer - data auto-ingested from S3 via Snowpipe"
+    
     tables:
       - name: patient_admissions
-        description: "One row per hospital admission"
+        description: "One row per hospital admission (loaded via Snowpipe - trusted feed)"
+      - name: gk_patient_admissions
+        description: "One row per hospital admission (loaded via Gatekeeper - validated feed)"
       - name: treatment_records
         description: "One row per treatment"
       - name: insurance_claims
         description: "One row per insurance claim"
+      - name: gk_treatment_records
+        description: "One row per treatment (loaded via Gatekeeper - validated feed)"
+      - name: gk_insurance_claims
+        description: "One row per claim (loaded via Gatekeeper - validated feed)"
       - name: seed_doctors
       - name: seed_hospitals
       - name: seed_insurers
