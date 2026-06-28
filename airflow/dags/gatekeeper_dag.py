@@ -1,11 +1,13 @@
 """
 gatekeeper_dag — Validate-before-load DQ pipeline.
 Watches incoming/ folder, runs 12 tiered checks, loads or quarantines.
-Independent of the main Snowpipe→dbt pipeline.
+On a SUCCESSFUL load, triggers the main healthcare_pipeline so the new
+data is transformed into Gold immediately (no waiting for the 10-min poll).
 """
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 PROJECT = "/opt/airflow/project"
 ALERT_EMAIL = "priyankapandey000111@gmail.com"
@@ -58,4 +60,13 @@ with DAG(
         bash_command=f"cd {PROJECT} && python snowpark/gatekeeper.py",
     )
 
-    gatekeeper
+    # After a successful validate+load, trigger the main pipeline to
+    # transform the new data into Gold immediately.
+    trigger_dbt = TriggerDagRunOperator(
+        task_id="trigger_healthcare_pipeline",
+        trigger_dag_id="healthcare_pipeline",
+        wait_for_completion=False,   # fire-and-forget; main DAG runs independently
+        reset_dag_run=True,
+    )
+
+    gatekeeper >> trigger_dbt

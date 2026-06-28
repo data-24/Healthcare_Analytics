@@ -2,6 +2,8 @@
 healthcare_pipeline DAG
 Sensor-driven: checks for new files every 10 min, runs full pipeline only when found.
 quality check → dbt run → dbt test → reconciliation. Emails on ANY failure.
+Can also be triggered externally (e.g. by the gatekeeper) — in that case the
+sensor is skipped because we already know new data was loaded.
 """
 from datetime import datetime, timedelta
 from airflow import DAG
@@ -64,7 +66,14 @@ with DAG(
 
     # ── SENSOR: only proceed if new files arrived in the last 15 min ──
     @task.sensor(poke_interval=60, timeout=300, mode="reschedule", soft_fail=True)
-    def wait_for_new_files():
+    def wait_for_new_files(**context):
+        # If this run was triggered externally (e.g. by the gatekeeper),
+        # skip the wait — we already know new data was loaded.
+        run_type = context["dag_run"].run_type
+        if run_type != "scheduled":
+            print(f"Run type '{run_type}' — triggered externally, skipping sensor wait.")
+            return True
+
         s = _snowflake_session()
         try:
             rows = s.sql("""
@@ -111,4 +120,4 @@ with DAG(
         bash_command=f"cd {PROJECT} && echo 'Pipeline complete — see AUDIT.FILE_RECONCILIATION'",
     )
 
-    sensor >> quality_check >> dbt_run >> dbt_snapshot >> dbt_test >> reconciliation               
+    sensor >> quality_check >> dbt_run >> dbt_snapshot >> dbt_test >> reconciliation
