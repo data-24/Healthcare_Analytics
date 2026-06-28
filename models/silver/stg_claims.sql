@@ -1,3 +1,12 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='claim_id',
+        incremental_strategy='merge',
+        on_schema_change='sync_all_columns'
+    )
+}}
+
 -- ════════════════════════════════════════════════════════════════════
 -- stg_claims (SILVER)
 -- Unions Snowpipe + Gatekeeper claims. Parses text dates (Bronze stores
@@ -14,6 +23,9 @@ with snowpipe_claims as (
         file_name, upload_dttm, load_dttm,
         'SNOWPIPE' as source_system
     from {{ source('bronze', 'insurance_claims') }}
+    {% if is_incremental() %}
+    where load_dttm > (select max(load_dttm) from {{ this }})
+    {% endif %}
 
 ),
 
@@ -25,6 +37,9 @@ gatekeeper_claims as (
         file_name, upload_dttm, load_dttm,
         'GATEKEEPER' as source_system
     from {{ source('bronze', 'gk_insurance_claims') }}
+    {% if is_incremental() %}
+    where load_dttm > (select max(load_dttm) from {{ this }})
+    {% endif %}
 
 ),
 

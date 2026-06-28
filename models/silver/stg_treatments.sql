@@ -1,3 +1,12 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='treatment_id',
+        incremental_strategy='merge',
+        on_schema_change='sync_all_columns'
+    )
+}}
+
 -- ════════════════════════════════════════════════════════════════════
 -- stg_treatments (SILVER)
 -- Unions Snowpipe + Gatekeeper treatments. Parses text dates (Bronze
@@ -6,7 +15,25 @@
 -- and STATISTICAL outlier detection (cost z-score per procedure).
 -- ════════════════════════════════════════════════════════════════════
 
+{% if is_incremental() %}
+with affected_keys as (
+
+    select procedure_code, admission_id
+    from {{ source('bronze', 'treatment_records') }}
+    where load_dttm > (select max(load_dttm) from {{ this }})
+
+    union
+
+    select procedure_code, admission_id
+    from {{ source('bronze', 'gk_treatment_records') }}
+    where load_dttm > (select max(load_dttm) from {{ this }})
+
+),
+
+snowpipe_treatments as (
+{% else %}
 with snowpipe_treatments as (
+{% endif %}
 
     select
         treatment_id, admission_id, doctor_id, procedure_code,
@@ -14,6 +41,10 @@ with snowpipe_treatments as (
         file_name, upload_dttm, load_dttm,
         'SNOWPIPE' as source_system
     from {{ source('bronze', 'treatment_records') }}
+    {% if is_incremental() %}
+    where procedure_code in (select procedure_code from affected_keys)
+       or admission_id in (select admission_id from affected_keys)
+    {% endif %}
 
 ),
 
@@ -25,6 +56,10 @@ gatekeeper_treatments as (
         file_name, upload_dttm, load_dttm,
         'GATEKEEPER' as source_system
     from {{ source('bronze', 'gk_treatment_records') }}
+    {% if is_incremental() %}
+    where procedure_code in (select procedure_code from affected_keys)
+       or admission_id in (select admission_id from affected_keys)
+    {% endif %}
 
 ),
 

@@ -1,32 +1,70 @@
 -- ════════════════════════════════════════════════════════════════════
--- stg_admissions  (SILVER)
+-- stg_admissions  (SILVER) — INCREMENTAL
 -- Why this layer exists: dedup, cross-row window logic, real readmission
--- detection, and row-level data-quality gating — none of which can be
--- done reliably/cheaply in Bronze or a BI tool.
+-- detection, and row-level data-quality gating.
+--
+-- INCREMENTAL STRATEGY (patient-scoped):
+-- Readmission detection needs each patient's FULL history (LAG over
+-- prior admissions). A naive "new rows only" incremental would miss
+-- readmissions whose prior admission is an old row. So on incremental
+-- runs we reprocess the COMPLETE history of any patient who received a
+-- new/updated admission since the last run. This keeps window functions
+-- correct while processing far less than a full rebuild.
 -- ════════════════════════════════════════════════════════════════════
 
+{{
+    config(
+        materialized='incremental',
+        unique_key='admission_id',
+        incremental_strategy='merge',
+        on_schema_change='sync_all_columns'
+    )
+}}
+
+-- Patients touched since the last run (only used on incremental runs).
+{% if is_incremental() %}
+with affected_patients as (
+
+    select patient_id from {{ source('bronze', 'patient_admissions') }}
+    where load_dttm > (select max(load_dttm) from {{ this }})
+
+    union
+
+    select patient_id from {{ source('bronze', 'gk_patient_admissions') }}
+    where load_dttm > (select max(load_dttm) from {{ this }})
+
+),
+
+snowpipe_admissions as (
+{% else %}
 with snowpipe_admissions as (
+{% endif %}
 
     select
-        admission_id, patient_id, doctor_id, hospital_id, admit_date,
+        admission_id, patient_id, doctor_id, hospital_id,
+        admit_date::varchar as admit_date,
         department, admission_type, diagnosis_code, length_of_stay,
         readmission_flag, file_name, upload_dttm, load_dttm,
         'SNOWPIPE' as source_system
     from {{ source('bronze', 'patient_admissions') }}
+    {% if is_incremental() %}
+    where patient_id in (select patient_id from affected_patients)
+    {% endif %}
 
 ),
 
 gatekeeper_admissions as (
 
     select
-        admission_id, patient_id, doctor_id, hospital_id, admit_date,
+        admission_id, patient_id, doctor_id, hospital_id,
+        admit_date::varchar as admit_date,
         department, admission_type, diagnosis_code, length_of_stay,
-        readmission_flag, file_name,
-        upload_dttm,
-        load_dttm,
+        readmission_flag, file_name, upload_dttm, load_dttm,
         'GATEKEEPER' as source_system
     from {{ source('bronze', 'gk_patient_admissions') }}
-
+    {% if is_incremental() %}
+    where patient_id in (select patient_id from affected_patients)
+    {% endif %}
 
 ),
 
@@ -38,8 +76,7 @@ source as (
 
 ),
 
--- ── 1) DEDUPLICATION: Snowpipe can re-load a file on retry.
---      Keep only the latest version of each admission_id by load_dttm.
+-- ── 1) DEDUPLICATION: keep latest version of each admission_id by load_dttm.
 deduplicated as (
 
     select *,
@@ -59,7 +96,10 @@ cleaned as (
         patient_id,
         upper(trim(doctor_id))    as doctor_id,
         upper(trim(hospital_id))  as hospital_id,
-        admit_date,
+        coalesce(
+            try_to_date(admit_date, 'YYYY-MM-DD'),
+            try_to_date(admit_date, 'DD/MM/YYYY')
+        ) as admit_date,
         length_of_stay,
 
         case upper(trim(admission_type))
@@ -138,7 +178,7 @@ final as (
 
         -- ── ROW-LEVEL DATA QUALITY ──
         case
-            when days_since_last_visit < 0    then 'OVERLAPPING_ADMISSION'
+            when datediff(day, prev_discharge_date, admit_date) < 0 then 'OVERLAPPING_ADMISSION'
             when length_of_stay < 0           then 'INVALID_NEGATIVE_LOS'
             when length_of_stay > 365         then 'INVALID_EXCESSIVE_LOS'
             when admit_date > current_date()  then 'INVALID_FUTURE_DATE'
