@@ -3,6 +3,10 @@
 -- Why this layer exists: dedup, cross-row window logic, real readmission
 -- detection, and row-level data-quality gating.
 --
+-- SINGLE INGESTION PATH: Snowpipe is retired. The gatekeeper validates
+-- every file and loads it into RAW.PATIENT_ADMISSIONS, so this model now
+-- reads ONE source table (no more Snowpipe + GK_ union).
+--
 -- INCREMENTAL STRATEGY (patient-scoped):
 -- Readmission detection needs each patient's FULL history (LAG over
 -- prior admissions). A naive "new rows only" incremental would miss
@@ -21,6 +25,7 @@
     )
 }}
 
+
 -- Patients touched since the last run (only used on incremental runs).
 {% if is_incremental() %}
 with affected_patients as (
@@ -28,16 +33,11 @@ with affected_patients as (
     select patient_id from {{ source('bronze', 'patient_admissions') }}
     where load_dttm > (select max(load_dttm) from {{ this }})
 
-    union
-
-    select patient_id from {{ source('bronze', 'gk_patient_admissions') }}
-    where load_dttm > (select max(load_dttm) from {{ this }})
-
 ),
 
-snowpipe_admissions as (
+source as (
 {% else %}
-with snowpipe_admissions as (
+with source as (
 {% endif %}
 
     select
@@ -45,34 +45,11 @@ with snowpipe_admissions as (
         admit_date::varchar as admit_date,
         department, admission_type, diagnosis_code, length_of_stay,
         readmission_flag, file_name, upload_dttm, load_dttm,
-        'SNOWPIPE' as source_system
+        'GATEKEEPER' as source_system
     from {{ source('bronze', 'patient_admissions') }}
     {% if is_incremental() %}
     where patient_id in (select patient_id from affected_patients)
     {% endif %}
-
-),
-
-gatekeeper_admissions as (
-
-    select
-        admission_id, patient_id, doctor_id, hospital_id,
-        admit_date::varchar as admit_date,
-        department, admission_type, diagnosis_code, length_of_stay,
-        readmission_flag, file_name, upload_dttm, load_dttm,
-        'GATEKEEPER' as source_system
-    from {{ source('bronze', 'gk_patient_admissions') }}
-    {% if is_incremental() %}
-    where patient_id in (select patient_id from affected_patients)
-    {% endif %}
-
-),
-
-source as (
-
-    select * from snowpipe_admissions
-    union all
-    select * from gatekeeper_admissions
 
 ),
 

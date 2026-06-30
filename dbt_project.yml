@@ -18,6 +18,8 @@ models:
     gold:
       +materialized: table
       +schema: marts
+      +transient: false
+      +data_retention_time_in_days: 90
 
 seeds:
   healthcare_analytics:

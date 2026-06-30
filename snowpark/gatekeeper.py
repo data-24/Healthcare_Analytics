@@ -1,9 +1,14 @@
 """
-GATEKEEPER — Validate-BEFORE-Load Data Quality Pipeline (multi-feed)
+GATEKEEPER — Validate-BEFORE-Load Data Quality Pipeline (multi-feed, single path)
 Handles patient_admissions, treatment_records, and insurance_claims.
-Reads each file's ACTUAL header so missing/extra columns are detected correctly.
-Routes each file to its matching config by filename, runs tiered checks,
-then loads (processed/) or quarantines (quarantine/).
+
+This is the ONLY ingestion path. Snowpipe is retired. Every file — in any
+batch (morning / afternoon / evening) — is uploaded to the incoming/ folder.
+
+Per file:
+  read the ACTUAL header  ->  run 12 tiered checks
+    PASS  -> COPY INTO the real RAW table  ->  move file to processed/
+    FAIL  -> move file to quarantine/  +  email  +  log, never loads
 """
 import os
 import uuid
@@ -29,10 +34,12 @@ COMMON = {
 }
 
 # ── Per-feed configs. The "file_pattern" decides which config a file uses. ──
+# target_table now points at the REAL RAW tables (no more GK_ prefix), so the
+# gatekeeper is the single validated front door to Bronze and dbt reads it directly.
 CONFIGS = {
     "patient_admissions": {
         "file_pattern":     "patient_admissions",
-        "target_table":     "HEALTHCARE_DB.RAW.GK_PATIENT_ADMISSIONS",
+        "target_table":     "HEALTHCARE_DB.RAW.PATIENT_ADMISSIONS",
         "expected_columns": ["admission_id", "patient_id", "doctor_id", "hospital_id",
                              "admit_date", "department", "admission_type",
                              "diagnosis_code", "length_of_stay", "readmission_flag"],
@@ -42,7 +49,6 @@ CONFIGS = {
         "date_column":      "admit_date",
         "category_column":  "admission_type",
         "valid_categories": ["EMG", "URG", "ELC"],
-        # COPY column list + the date column index (1-based) for TO_DATE
         "load_columns":     "admission_id, patient_id, doctor_id, hospital_id, admit_date, "
                             "department, admission_type, diagnosis_code, length_of_stay, "
                             "readmission_flag, file_name, upload_dttm, load_dttm",
@@ -50,7 +56,7 @@ CONFIGS = {
     },
     "treatment_records": {
         "file_pattern":     "treatment_records",
-        "target_table":     "HEALTHCARE_DB.RAW.GK_TREATMENT_RECORDS",
+        "target_table":     "HEALTHCARE_DB.RAW.TREATMENT_RECORDS",
         "expected_columns": ["treatment_id", "admission_id", "doctor_id", "procedure_code",
                              "treatment_date", "cost", "outcome"],
         "required_columns": ["treatment_id", "admission_id", "doctor_id"],
@@ -65,7 +71,7 @@ CONFIGS = {
     },
     "insurance_claims": {
         "file_pattern":     "insurance_claims",
-        "target_table":     "HEALTHCARE_DB.RAW.GK_INSURANCE_CLAIMS",
+        "target_table":     "HEALTHCARE_DB.RAW.INSURANCE_CLAIMS",
         "expected_columns": ["claim_id", "admission_id", "insurance_id", "claim_amount",
                              "approved_amount", "claim_status", "claim_date", "settle_date"],
         "required_columns": ["claim_id", "admission_id", "insurance_id"],
@@ -227,6 +233,11 @@ def run_checks(session, file_name, header, cfg):
 
 
 def load_file(session, file_name, cfg):
+    """COPY the validated file into the REAL RAW table, filling the 3 metadata columns.
+       Returns the number of rows this COPY added (not the whole-table count), so
+       batch loads with repeated filenames report the correct per-batch row count."""
+    before = session.sql(
+        f"SELECT COUNT(*) c FROM {cfg['target_table']}").collect()[0]["C"]
     session.sql(f"""
         COPY INTO {cfg['target_table']}
         ({cfg['load_columns']})
@@ -240,12 +251,20 @@ def load_file(session, file_name, cfg):
         FILE_FORMAT = (FORMAT_NAME = '{COMMON['file_format']}')
         ON_ERROR = ABORT_STATEMENT
     """).collect()
-    return session.sql(f"SELECT COUNT(*) c FROM {cfg['target_table']} "
-                       f"WHERE file_name LIKE '%{file_name}'").collect()[0]["C"]
+    after = session.sql(
+        f"SELECT COUNT(*) c FROM {cfg['target_table']}").collect()[0]["C"]
+    return after - before
 
 
 def move_file(session, file_name, dest_stage):
-    session.sql(f"COPY FILES INTO @{dest_stage}/ "
+    """Move the file out of incoming/ into a per-run TIMESTAMPED SUBFOLDER of the
+    destination (processed/ or quarantine/). The timestamp subfolder means a client
+    can upload the SAME filename every batch (morning/afternoon/evening) and nothing
+    is ever overwritten — each batch keeps its own copy at
+        processed/20260629_130245/patient_admissions.csv
+    so the S3 trail matches the AUDIT.FILE_PROCESSING_LOG record."""
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    session.sql(f"COPY FILES INTO @{dest_stage}/{stamp}/ "
                 f"FROM @{COMMON['incoming_stage']}/{file_name}").collect()
     session.sql(f"REMOVE @{COMMON['incoming_stage']}/{file_name}").collect()
 

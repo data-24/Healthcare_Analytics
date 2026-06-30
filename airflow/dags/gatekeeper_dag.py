@@ -1,8 +1,16 @@
 """
-gatekeeper_dag — Validate-before-load DQ pipeline.
+gatekeeper_dag - Validate-before-load DQ pipeline.
 Watches incoming/ folder, runs 12 tiered checks, loads or quarantines.
 On a SUCCESSFUL load, triggers the main healthcare_pipeline so the new
 data is transformed into Gold immediately (no waiting for the 10-min poll).
+
+NOTE ON THE TWO GATEKEEPER EMAILS:
+  1) QUARANTINE email  - sent by snowpark/gatekeeper.py when a FILE fails the
+     12 checks. Detailed (file, failed checks, counts). Already logs to
+     AUDIT.FILE_PROCESSING_LOG + AUDIT.DQ_METRICS_LOG.
+  2) DAG-FAILURE email - sent by THIS file's on_failure_callback when the
+     gatekeeper TASK ITSELF crashes (Snowflake unreachable, bad key, python
+     error - not a quarantine). Now formatted + logged to AUDIT.PIPELINE_ERROR_LOG.
 """
 from datetime import datetime, timedelta
 from airflow import DAG
@@ -13,28 +21,74 @@ PROJECT = "/opt/airflow/project"
 ALERT_EMAIL = "priyankapandey000111@gmail.com"
 
 
+def _snowflake_session():
+    import os
+    from snowflake.snowpark import Session
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.backends import default_backend
+    k = open(os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"], "rb").read()
+    pk = serialization.load_pem_private_key(k, password=None, backend=default_backend())
+    pkb = pk.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption())
+    return Session.builder.configs({
+        "account": os.environ["SNOWFLAKE_ACCOUNT"], "user": os.environ["SNOWFLAKE_USER"],
+        "private_key": pkb, "role": "ACCOUNTADMIN", "warehouse": "HEALTHCARE_WH",
+        "database": "HEALTHCARE_DB", "schema": "AUDIT"}).create()
+
+
 def send_failure_email(context):
-    import subprocess, os
-    task_id = context["task_instance"].task_id
-    py = (
-        "import os; from snowflake.snowpark import Session;"
-        "from cryptography.hazmat.primitives import serialization;"
-        "from cryptography.hazmat.backends import default_backend;"
-        "k=open(os.environ['SNOWFLAKE_PRIVATE_KEY_PATH'],'rb').read();"
-        "pk=serialization.load_pem_private_key(k,password=None,backend=default_backend());"
-        "pkb=pk.private_bytes(encoding=serialization.Encoding.DER,"
-        "format=serialization.PrivateFormat.PKCS8,"
-        "encryption_algorithm=serialization.NoEncryption());"
-        "s=Session.builder.configs({'account':os.environ['SNOWFLAKE_ACCOUNT'],"
-        "'user':os.environ['SNOWFLAKE_USER'],'private_key':pkb,'role':'ACCOUNTADMIN',"
-        "'warehouse':'HEALTHCARE_WH','database':'HEALTHCARE_DB','schema':'AUDIT'}).create();"
-        f"s.sql(\"call system$send_email('HEALTHCARE_EMAIL_INT','{ALERT_EMAIL}',"
-        f"'Gatekeeper DAG failed','Task {task_id} failed - check logs')\").collect(); s.close()"
+    import datetime as _dt
+    ti = context["task_instance"]
+    task_id = ti.task_id
+    dag_id = ti.dag_id
+    try_no = ti.try_number
+    max_tries = ti.max_tries + 1
+    run_type = str(context["dag_run"].run_type).split(".")[-1].lower()
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Plain-English meaning per task
+    stage_meaning = {
+        "gatekeeper_validate":
+            "The gatekeeper worker itself failed to run (e.g. Snowflake unreachable, "
+            "bad credentials, or a script error). This is NOT a file quarantine - "
+            "if a file had failed the 12 checks you'd get a QUARANTINE email instead.",
+        "trigger_healthcare_pipeline":
+            "Failed to trigger the downstream healthcare_pipeline transform DAG.",
+    }.get(task_id, "A gatekeeper task failed.")
+
+    subject = f"Gatekeeper Pipeline FAILED - {task_id}"
+    body = (
+        f"Healthcare GATEKEEPER pipeline FAILED - ingestion halted.\n\n"
+        f"  DAG:            {dag_id}\n"
+        f"  Failed task:    {task_id}\n"
+        f"  Status:         FAILED (downstream steps skipped)\n"
+        f"  Triggered by:   {run_type}\n"
+        f"  Attempt:        {try_no} of {max_tries}\n"
+        f"  Failed at:      {ts}\n\n"
+        f"  What happened:\n"
+        f"    - {stage_meaning}\n\n"
+        f"  Action: Open Airflow > {dag_id} > {task_id} > Logs for the full error, "
+        f"fix the issue, then re-run."
     )
+    safe_subject = subject.replace("'", "")
+    safe_body = body.replace("'", "")
     try:
-        subprocess.run(["python", "-c", py], check=True)
+        s = _snowflake_session()
+        # 1) send the alert email
+        s.sql("call system$send_email(?, ?, ?, ?)",
+              params=["HEALTHCARE_EMAIL_INT", ALERT_EMAIL, safe_subject, safe_body]).collect()
+        # 2) write the SAME details to the permanent error-log table
+        s.sql(
+            "INSERT INTO HEALTHCARE_DB.AUDIT.PIPELINE_ERROR_LOG "
+            "(dag_id, task_id, status, triggered_by, attempt, error_summary, failed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ)",
+            params=[dag_id, task_id, "FAILED", run_type,
+                    f"{try_no} of {max_tries}", stage_meaning]).collect()
+        s.close()
     except Exception as e:
-        print(f"failure email could not be sent: {e}")
+        print(f"failure email/log could not be written: {e}")
 
 
 default_args = {

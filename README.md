@@ -1,155 +1,207 @@
-# Healthcare Analytics Data Platform
+# 🏥 Healthcare Analytics Platform
 
-An end-to-end, production-grade data engineering platform that ingests raw healthcare files, validates them, transforms them through a medallion architecture, tracks dimension history, and exposes the results through SQL, dbt tests, and an AI chat interface.
-
-Built on **AWS S3, Snowflake, dbt, Apache Airflow, Snowpark, and Snowflake Cortex AI**.
-
----
-
-## Overview
-
-This project takes three raw healthcare CSV feeds — patient admissions, treatment records, and insurance claims — and turns them into a clean, tested, query-ready analytics layer with full data-quality controls, history tracking, and a natural-language interface.
-
-It demonstrates **two ingestion patterns side by side**:
-
-- **Snowpipe** — fast, auto-ingest for trusted feeds (real-time load into the Bronze layer).
-- **Gatekeeper** — a validate-before-load data-quality pipeline for untrusted feeds (files are checked first and only loaded if they pass).
+An end-to-end data engineering pipeline that turns raw healthcare files into
+business-ready analytics — fully automated, validated, monitored, and
+queryable through dashboards and AI chat.
 
 ---
 
-## Architecture
+## 📌 What this project does (at a glance)
+
+Three healthcare datasets — **patient admissions, treatment records, and
+insurance claims** — land as CSV files in cloud storage. The pipeline then:
+
+1. **Validates** every file before loading (12 quality checks — bad files are
+   quarantined and an alert email is sent).
+2. **Loads** good data into a layered "medallion" warehouse (Bronze → Silver → Gold).
+3. **Transforms** it into a clean **star schema** ready for analytics.
+4. **Tests** the data automatically (40+ data-quality tests).
+5. **Serves** it to **Power BI dashboards** and a **Cortex AI** chat assistant.
+6. **Runs on a schedule** and **emails alerts** if anything breaks.
+
+The result: drop a file in cloud storage, and a few minutes later it is
+validated, loaded, transformed, tested, and available for analysis — with full
+logging and alerting, no manual steps.
+
+---
+
+## 🎯 Who it's for / why it exists
+
+- **Analysts & business users** — clean KPIs (admissions, length of stay,
+  readmission rates, claim approvals, treatment costs) via dashboards or plain-English AI questions.
+- **Data team** — a production-grade, monitored, testable pipeline with full audit trails.
+- **Compliance** — every file, every quality check, and every failure is logged;
+  historical doctor attributes are preserved point-in-time (SCD2).
+
+---
+
+## 🧱 Architecture
 
 ```
-                    ┌─────────────────────────────────────────────┐
-   Raw CSV files    │                  SNOWFLAKE                   │
-   (S3 bucket)      │                                             │
-        │           │   BRONZE (RAW)  →  SILVER (STAGING)  →  GOLD (MARTS)
-        │           │   raw landing      dedup, DQ flags      star schema
-        ├─ healthcare/  ─ Snowpipe ─►  ────────────────────────────────►
-        │           │                                             │
-        └─ incoming/    ─ Gatekeeper ─► validated load OR quarantine
-                    │                                             │
-                    │   + SCD2 snapshots (dimension history)      │
-                    │   + Cortex AI semantic view + chat          │
-                    └─────────────────────────────────────────────┘
-                                       ▲
-                          Orchestrated by Apache Airflow
+                          ┌─────────────────────────────────────┐
+                          │      Airflow  (orchestration)        │
+                          │  gatekeeper_dag  +  healthcare_pipe  │
+                          └───────────────┬─────────────────────┘
+                                          │ runs on schedule
+                                          ▼
+   ┌──────────┐     ┌──────────────┐     ┌─────────┐     ┌──────────┐     ┌──────────┐
+   │  AWS S3  │ ──▶ │  Gatekeeper  │ ──▶ │   RAW   │ ──▶ │ STAGING  │ ──▶ │  MARTS   │
+   │ incoming │     │  (Snowpark)  │     │ Bronze  │     │  Silver  │     │   Gold   │
+   │ processed│     │  12 checks   │     │ (landed)│     │ (cleaned)│     │  (star)  │
+   │quarantine│     │ validate→load│     └─────────┘     └──────────┘     └────┬─────┘
+   └──────────┘     └──────┬───────┘                                           │
+                          │ bad file                                           ▼
+                          ▼ → quarantine + email alert            ┌────────────────────────┐
+                  ┌───────────────┐                               │  Power BI  +  Cortex AI │
+                  │  AUDIT (logs) │                               │  dashboards  +  chat    │
+                  └───────────────┘                               └────────────────────────┘
 ```
 
-**Medallion layers**
+**The medallion layers**
 
-| Layer | Schema | Purpose |
-|-------|--------|---------|
-| Bronze | `RAW` | Raw landing zone with audit columns (file_name, load_dttm) |
-| Silver | `STAGING` | Deduplication, decoding, derived metrics, DQ flags |
-| Gold | `MARTS` | Star schema — fact and dimension tables with surrogate keys |
+| Layer | Schema | Built by | Holds |
+|---|---|---|---|
+| Bronze | `RAW` | Gatekeeper | Exact copies of source data |
+| Silver | `STAGING` | dbt | Cleaned, typed, decoded data |
+| Gold | `MARTS` | dbt | Star schema: dimensions + facts |
+| History | `SNAPSHOTS` | dbt | Slowly-changing history (SCD2) |
+| Monitoring | `AUDIT` | hand-built SQL | Logs of every file, check, error |
 
----
+**The Gold star schema** — 3 fact tables, 5 dimensions, 8 declared relationships:
 
-## Tech Stack
-
-| Tool | Role |
-|------|------|
-| **AWS S3** | Raw file landing zone |
-| **Snowflake** | Cloud data warehouse |
-| **Snowpipe** | Auto-ingest of new files into Bronze |
-| **dbt Core** | Transformations, tests, snapshots (SCD2) |
-| **Snowpark (Python)** | Data-quality gatekeeper and schema checks |
-| **Apache Airflow** | Orchestration (Docker, LocalExecutor) |
-| **Snowflake Cortex** | AI semantic view + natural-language chat |
-| **Power BI** | Dashboard / consumption layer (planned) |
-
----
-
-## Key Features
-
-### Medallion transformation (dbt)
-- **Silver** models deduplicate by primary key, decode coded values, and derive metrics such as 30-day readmission flags (via window functions), cost outliers, and claim approval ratios.
-- **Gold** models form a star schema with surrogate keys generated by `dbt_utils`, including fact tables (admissions, treatments, claims) and dimensions (doctor, hospital, insurance, patient, date).
-- **36 dbt tests** (unique, not_null, relationships, accepted_values) validate the models on every run.
-
-### SCD Type 2 + time-accurate reporting
-- A dbt **snapshot** tracks dimension history (e.g. a doctor changing specialty over time).
-- A history-aware Gold model joins each fact to the dimension version **valid at the event date** — so a 2023 admission reflects the doctor's specialty *at that time*, not their current one.
-
-### Data quality
-- **Snowpark quality check** validates incoming file schemas and emails on mismatch.
-- **Gatekeeper pipeline** runs 12 tiered checks (Gate / Threshold / Advisory) and either loads a clean file or moves a bad file to a quarantine folder, with a detailed email alert and granular audit logging.
-
-### Orchestration (Airflow)
-- A **sensor-driven DAG** detects newly loaded files and runs the full transformation pipeline (quality check → dbt run → snapshot → tests → reconciliation).
-- A **separate gatekeeper DAG** validates files in the incoming folder.
-- Email alerts fire on any task failure.
-
-### AI chat (Cortex)
-- A **semantic view** describes the star schema in business terms (tables, relationships, metrics, synonyms).
-- A **Streamlit chat app** lets users ask questions in plain English (e.g. *"Which specialty has the highest readmission rate?"*) and Cortex Analyst converts them to SQL and answers.
+```
+        DIM_PATIENT   DIM_DOCTOR   DIM_HOSPITAL
+              \           |            /
+               \          |           /
+                →   FCT_ADMISSIONS   ←
+                          |
+                       DIM_DATE   ← (shared by all three facts)
+                          |
+        FCT_TREATMENTS ←      → FCT_CLAIMS
+              |                      |
+          DIM_DOCTOR             DIM_INSURANCE
+```
 
 ---
 
-## Repository Structure
+## 🛠️ Tools used
+
+| Tool | Role in the project |
+|---|---|
+| **AWS S3** | Cloud storage — where source files land (incoming / processed / quarantine) |
+| **Snowflake** | Cloud data warehouse — stores all layers (Bronze/Silver/Gold/Audit) |
+| **Snowpark (Python)** | Runs the "gatekeeper" validation before any data is loaded |
+| **dbt Core** | Builds & tests the Silver and Gold layers (SQL transformations + data tests) |
+| **Apache Airflow** | Orchestrates the whole pipeline on a schedule, with failure alerts |
+| **Snowflake Cortex AI** | Natural-language chat over the Gold star schema |
+| **Power BI** | Dashboards built on the Gold star schema |
+| **Git / GitHub** | Version control for all code |
+
+---
+
+## 📂 Repository structure
 
 ```
 Healthcare_Analytics/
-├── models/
-│   ├── silver/            # staging models (dedup, DQ, derived metrics)
-│   ├── gold/              # star schema: facts + dimensions + history
-│   └── _sources.yml       # Bronze source definitions
-├── snapshots/
-│   └── scd_doctors.sql    # SCD2 dimension history
-├── snowpark/
-│   ├── quality_check.py   # schema validation for the Snowpipe flow
-│   └── gatekeeper.py      # validate-before-load DQ pipeline (12 checks)
-├── macros/                # custom dbt macros
-├── seeds/                 # reference data (doctors, hospitals, insurers)
-├── airflow/
-│   ├── dags/
-│   │   ├── healthcare_pipeline.py   # main sensor-driven pipeline
-│   │   └── gatekeeper_dag.py        # gatekeeper DQ pipeline
-│   └── docker-compose.yaml
-├── dbt_project.yml
-└── packages.yml
+├── snowflake_setup/        ← numbered SQL to build Snowflake from scratch
+│   ├── 01_account_setup.sql
+│   ├── 02_storage_integration.sql
+│   ├── 03_file_formats_and_stages.sql
+│   ├── 04_raw_tables.sql
+│   ├── 05_audit_tables.sql
+│   ├── 06_email_integration.sql
+│   ├── 07_dbt_handoff_note.sql
+│   └── 08_add_star_schema_keys.sql
+├── models/                 ← dbt transformations
+│   ├── silver/             ← Silver (staging) models  → STAGING schema
+│   └── gold/               ← Gold (dims + facts)      → MARTS schema
+├── seeds/                  ← reference CSVs (doctors, hospitals, insurers)
+├── snapshots/              ← SCD2 history (doctor changes over time)
+├── macros/                 ← reusable dbt SQL functions
+├── tests/                  ← custom data-quality tests
+├── snowpark/               ← gatekeeper.py + quality_check.py (validation workers)
+├── airflow/dags/           ← gatekeeper_dag.py + healthcare_pipeline.py
+└── dbt_project.yml         ← dbt configuration
 ```
 
 ---
 
-## How to Run
+## ❄️ Snowflake setup — run these in order
 
-> Prerequisites: a Snowflake account with Cortex enabled, an AWS S3 bucket, Python with a `dbt_env` virtual environment, and Docker Desktop.
+This folder (`snowflake_setup/`) builds the entire Snowflake side from scratch.
+A new person can run these top to bottom and end up with a working warehouse,
+database, schemas, role, S3 link, tables, audit logs, and email alerts — ready
+for dbt to build the Silver/Gold layers.
 
-1. **Set up Snowflake objects** — database, warehouse, schemas, storage integration, stages, file formats.
-2. **Configure S3** — bucket, folders (`healthcare/`, `incoming/`, `processed/`, `quarantine/`), IAM role, and event notifications.
-3. **Load reference data** — `dbt seed`.
-4. **Build the models** — `dbt run`, then `dbt test`.
-5. **Capture history** — `dbt snapshot`.
-6. **Start Airflow** — `docker compose up -d` in the `airflow/` folder, then unpause the DAGs.
-7. **Ingest data** — drop trusted files in `healthcare/` (Snowpipe) or untrusted files in `incoming/` (gatekeeper).
-8. **Chat with the data** — open the Cortex Streamlit app in Snowsight.
+### Before you start, replace these placeholders
+
+Search-and-replace across the files:
+
+| Placeholder | Replace with |
+|---|---|
+| `<YOUR_AWS_ACCOUNT_ID>` | your 12-digit AWS account number |
+| `<YOUR_BUCKET>` | your S3 bucket name |
+| `<YOUR_ALERT_EMAIL>` | the inbox that receives alerts |
+| `ADMIN` (in script 01) | your Snowflake login username, if different |
+
+### Run order (in a Snowsight worksheet, whole file each time)
+
+1. **01_account_setup.sql** — warehouse, database, 5 schemas, role + grants
+2. **02_storage_integration.sql** — secure key-less link to S3 (do the AWS steps in its comments)
+3. **03_file_formats_and_stages.sql** — CSV recipes + 3 stages (incoming/processed/quarantine)
+4. **04_raw_tables.sql** — the 3 Bronze landing tables
+5. **05_audit_tables.sql** — 4 monitoring/log tables (+ seeds your alert email)
+6. **06_email_integration.sql** — email alerts + a test send
+7. **07_dbt_handoff_note.sql** — (reading only) what dbt builds vs what you built
+
+Then, from the dbt project folder in a terminal:
+
+```bash
+dbt deps     # install packages
+dbt seed     # load doctors / hospitals / insurers into RAW
+dbt run      # build Silver → Gold → Snapshots
+dbt test     # run all data-quality tests
+```
+
+8. **08_add_star_schema_keys.sql** — run in Snowsight AFTER the first `dbt run`
+   to declare the Gold primary/foreign keys (for Power BI / Cortex auto-joins).
+   Re-run it after any `dbt run --full-refresh`.
 
 ---
 
-## Data Quality Checks (Gatekeeper)
+## 📖 What each thing is, in one line
 
-| Tier | Checks |
-|------|--------|
-| **Gate** (fatal) | file not empty, column count, required columns |
-| **Threshold** (blocks load) | row count, null %, data types, primary-key uniqueness, valid admission types |
-| **Advisory** (warn only) | duplicate rows, date range, length-of-stay range, readmission flag values |
-
-Failed Gate or Threshold checks move the file to `quarantine/`, send a detailed email, and log every check to `DQ_METRICS_LOG`.
-
-> **Note:** The gatekeeper currently validates the patient-admissions feed and is designed to extend to treatment and claims feeds using the same pattern.
-
----
-
-## Roadmap
-
-- Extend the gatekeeper to treatment and claims feeds.
-- Add a Power BI dashboard as the consumption layer.
-- Add Cortex Search over clinical notes (requires unstructured text data).
+- **Warehouse** = the compute engine (you pay only while it runs)
+- **Database > Schema > Table** = folder > sub-folder > data
+- **Role** = a job badge that owns objects and gets only the permissions it needs
+- **Storage integration** = secure handshake to S3 (no AWS keys in SQL)
+- **Stage** = a pointer to an S3 folder
+- **File format** = how to read the CSV
+- **RAW tables** = exact copies of source data (Bronze)
+- **Audit tables** = the pipeline's flight recorder
+- **Email integration** = lets Snowflake send alert emails
+- **Gatekeeper** = validates every file (12 checks) before loading; quarantines bad ones
+- **Seeds** = small reference CSVs loaded as tables (doctors, hospitals, insurers)
+- **Snapshots** = track dimension changes over time (SCD2 — e.g. a doctor's seniority history)
+- **Star schema** = facts in the middle, dimensions around them — the BI-friendly model
 
 ---
 
- Data Engineering Project
+## 🔁 Daily operation
 
-GitHub: [github.com/data-24/Healthcare_Analytics](https://github.com/data-24/Healthcare_Analytics)
+1. A file is dropped into **S3 `incoming/`**.
+2. The **gatekeeper** (run by Airflow every 10 min) validates it:
+   - ✅ passes → loaded into RAW, file moved to `processed/`
+   - ❌ fails → moved to `quarantine/`, **alert email sent**, logged in AUDIT
+3. The **pipeline DAG** runs dbt: `run → snapshot → test → reconciliation`.
+4. Fresh data appears in the **Gold star schema** for Power BI and Cortex.
+5. Any failure → **alert email** + a row in the AUDIT logs.
+
+---
+
+## ⚠️ Things never to do by hand
+
+- Don't **truncate seeds** (doctors/hospitals/insurers) — reload with `dbt seed`.
+- Don't **manually create/truncate** Silver, Gold, or Snapshot tables — dbt owns them (use `dbt run`, or `--full-refresh` to rebuild).
+- Don't **truncate `EMAIL_RECIPIENT_LOG`** — it controls who gets alerts.
+- After any `dbt run --full-refresh`, **re-run `08_add_star_schema_keys.sql`** (a full refresh clears the declared keys).

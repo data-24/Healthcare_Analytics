@@ -39,13 +39,15 @@ models:
       - name: admission_id
         tests: [unique, not_null]
       - name: doctor_sk
-        description: "Referential integrity → dim_doctor"
+        description: "Referential integrity -> dim_doctor"
         tests:
+          - not_null
           - relationships:
               to: ref('dim_doctor')
               field: doctor_sk
       - name: hospital_sk
         tests:
+          - not_null
           - relationships:
               to: ref('dim_hospital')
               field: hospital_sk
@@ -56,6 +58,7 @@ models:
         tests: [unique, not_null]
       - name: doctor_sk
         tests:
+          - not_null
           - relationships:
               to: ref('dim_doctor')
               field: doctor_sk
@@ -64,8 +67,13 @@ models:
     columns:
       - name: claim_id
         tests: [unique, not_null]
+      - name: claim_status
+        tests:
+          - accepted_values:
+              values: ['Approved','Rejected','Pending','Unknown']
       - name: insurance_sk
         tests:
+          - not_null
           - relationships:
               to: ref('dim_insurance')
               field: insurance_sk

@@ -1,14 +1,24 @@
 """
-healthcare_pipeline DAG
-Sensor-driven: checks for new files every 10 min, runs full pipeline only when found.
-quality check → dbt run → dbt test → reconciliation. Emails on ANY failure.
-Can also be triggered externally (e.g. by the gatekeeper) — in that case the
-sensor is skipped because we already know new data was loaded.
+healthcare_pipeline DAG  (trigger-only, no sensor)
+Transforms validated Bronze data into Silver + Gold.
+  dbt run -> dbt snapshot -> dbt test -> reconciliation.
+
+Snowpipe is retired. The GATEKEEPER (gatekeeper_dag.py) is the single validated
+ingestion path: it validates every file, loads good ones into RAW, quarantines bad
+ones, then TRIGGERS this pipeline. So this DAG no longer polls for new files with a
+sensor — it runs when the gatekeeper triggers it (and on its 10-min schedule as a
+backup).
+
+ALERTS (email only on REAL breakage):
+  - schema mismatch / any of the 12 checks fail  -> emailed by the GATEKEEPER
+  - dbt run breaks                               -> dbt_run task fails  -> email
+  - any of the 41 dbt tests fail                 -> dbt_test task fails  -> email
+  - any task error                               -> on_failure_callback -> email
+There is no data-watching sensor, so there are no false-alarm "no new files" emails.
 """
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-from airflow.sdk import task   # modern Airflow 3 task decorator
 
 PROJECT = "/opt/airflow/project"
 PROFILES_DIR = "/opt/airflow/config"
@@ -33,17 +43,55 @@ def _snowflake_session():
 
 
 def send_failure_email(context):
-    task_id = context["task_instance"].task_id
-    exec_dt = context["ts"]
+    import datetime
+    ti = context["task_instance"]
+    task_id = ti.task_id
+    dag_id = ti.dag_id
+    try_no = ti.try_number
+    max_tries = ti.max_tries + 1
+    # Clean label: 'DagRunType.MANUAL' -> 'manual', 'DagRunType.SCHEDULED' -> 'scheduled'
+    run_type = str(context["dag_run"].run_type).split(".")[-1].lower()
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Plain-English description of what each task failing means
+    stage_meaning = {
+        "dbt_run":      "dbt failed to build the Silver/Gold models (broken SQL or model error).",
+        "dbt_snapshot": "dbt failed to capture SCD2 snapshot history.",
+        "dbt_test":     "One or more of the 36 dbt data-quality tests failed.",
+        "reconciliation": "The reconciliation step failed.",
+    }.get(task_id, "A pipeline task failed.")
+
     subject = f"Airflow Pipeline FAILED - {task_id}"
-    body = f"Task {task_id} failed at {exec_dt}. Check Airflow logs."
+    body = (
+        f"Healthcare AIRFLOW pipeline FAILED - transform halted.\n\n"
+        f"  DAG:            {dag_id}\n"
+        f"  Failed task:    {task_id}\n"
+        f"  Status:         FAILED (downstream steps skipped)\n"
+        f"  Triggered by:   {run_type}\n"
+        f"  Attempt:        {try_no} of {max_tries}\n"
+        f"  Failed at:      {ts}\n\n"
+        f"  What happened:\n"
+        f"    - {stage_meaning}\n\n"
+        f"  Action: Open Airflow > {dag_id} > {task_id} > Logs for the full error, "
+        f"fix the issue, then re-run the pipeline."
+    )
+    safe_subject = subject.replace("'", "")
+    safe_body = body.replace("'", "")
     try:
         s = _snowflake_session()
-        s.sql(f"call system$send_email('HEALTHCARE_EMAIL_INT','{ALERT_EMAIL}',"
-              f"'{subject}','{body}')").collect()
+        # 1) send the alert email
+        s.sql("call system$send_email(?, ?, ?, ?)",
+              params=["HEALTHCARE_EMAIL_INT", ALERT_EMAIL, safe_subject, safe_body]).collect()
+        # 2) write the SAME details to the permanent error-log table
+        s.sql(
+            "INSERT INTO HEALTHCARE_DB.AUDIT.PIPELINE_ERROR_LOG "
+            "(dag_id, task_id, status, triggered_by, attempt, error_summary, failed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ)",
+            params=[dag_id, task_id, "FAILED", run_type,
+                    f"{try_no} of {max_tries}", stage_meaning]).collect()
         s.close()
     except Exception as e:
-        print(f"failure email could not be sent: {e}")
+        print(f"failure email/log could not be written: {e}")
 
 
 default_args = {
@@ -55,54 +103,15 @@ default_args = {
 
 with DAG(
     dag_id="healthcare_pipeline",
-    description="Sensor-driven healthcare pipeline",
+    description="Trigger-only healthcare transform pipeline (single gatekeeper path)",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
-    schedule=timedelta(minutes=10),   # wake up every 10 min to check
+    schedule=timedelta(minutes=10),   # backup schedule; normally triggered by gatekeeper
     catchup=False,
     max_active_runs=1,
     tags=["healthcare", "dbt", "snowflake"],
 ) as dag:
 
-    # ── SENSOR: only proceed if new files arrived in the last 15 min ──
-    @task.sensor(poke_interval=60, timeout=300, mode="reschedule", soft_fail=True)
-    def wait_for_new_files(**context):
-        # If this run was triggered externally (e.g. by the gatekeeper),
-        # skip the wait — we already know new data was loaded.
-        run_type = context["dag_run"].run_type
-        if run_type != "scheduled":
-            print(f"Run type '{run_type}' — triggered externally, skipping sensor wait.")
-            return True
-
-        s = _snowflake_session()
-        try:
-            rows = s.sql("""
-                select count(*) as new_files from (
-                    select file_name from table(information_schema.copy_history(
-                        table_name=>'HEALTHCARE_DB.RAW.PATIENT_ADMISSIONS',
-                        start_time=>dateadd(minute,-15,current_timestamp())))
-                    union all
-                    select file_name from table(information_schema.copy_history(
-                        table_name=>'HEALTHCARE_DB.RAW.TREATMENT_RECORDS',
-                        start_time=>dateadd(minute,-15,current_timestamp())))
-                    union all
-                    select file_name from table(information_schema.copy_history(
-                        table_name=>'HEALTHCARE_DB.RAW.INSURANCE_CLAIMS',
-                        start_time=>dateadd(minute,-15,current_timestamp())))
-                )
-            """).collect()
-            new_count = rows[0]["NEW_FILES"]
-            print(f"New files detected in last 15 min: {new_count}")
-            return new_count > 0       # True = proceed, False = keep waiting
-        finally:
-            s.close()
-
-    sensor = wait_for_new_files()
-
-    quality_check = BashOperator(
-        task_id="quality_check",
-        bash_command=f"cd {PROJECT} && python snowpark/quality_check.py",
-    )
     dbt_run = BashOperator(
         task_id="dbt_run",
         bash_command=f"cd {PROJECT} && dbt run --profiles-dir {PROFILES_DIR} --project-dir {PROJECT}",
@@ -117,7 +126,7 @@ with DAG(
     )
     reconciliation = BashOperator(
         task_id="reconciliation",
-        bash_command=f"cd {PROJECT} && echo 'Pipeline complete — see AUDIT.FILE_RECONCILIATION'",
+        bash_command=f"cd {PROJECT} && echo 'Pipeline complete - see AUDIT.FILE_RECONCILIATION'",
     )
 
-    sensor >> quality_check >> dbt_run >> dbt_snapshot >> dbt_test >> reconciliation
+    dbt_run >> dbt_snapshot >> dbt_test >> reconciliation

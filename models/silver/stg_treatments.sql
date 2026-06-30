@@ -9,7 +9,9 @@
 
 -- ════════════════════════════════════════════════════════════════════
 -- stg_treatments (SILVER)
--- Unions Snowpipe + Gatekeeper treatments. Parses text dates (Bronze
+-- SINGLE INGESTION PATH: Snowpipe retired. The gatekeeper validates every
+-- file and loads it into RAW.TREATMENT_RECORDS, so this model reads ONE
+-- source table (no more Snowpipe + GK_ union). Parses text dates (Bronze
 -- stores dates as raw text; Silver converts them - medallion principle).
 -- Complex logic: dedup, outcome decode, per-admission cost context,
 -- and STATISTICAL outlier detection (cost z-score per procedure).
@@ -22,52 +24,23 @@ with affected_keys as (
     from {{ source('bronze', 'treatment_records') }}
     where load_dttm > (select max(load_dttm) from {{ this }})
 
-    union
-
-    select procedure_code, admission_id
-    from {{ source('bronze', 'gk_treatment_records') }}
-    where load_dttm > (select max(load_dttm) from {{ this }})
-
 ),
 
-snowpipe_treatments as (
+source as (
 {% else %}
-with snowpipe_treatments as (
+with source as (
 {% endif %}
 
     select
         treatment_id, admission_id, doctor_id, procedure_code,
         treatment_date::varchar as treatment_date, cost, outcome,
         file_name, upload_dttm, load_dttm,
-        'SNOWPIPE' as source_system
+        'GATEKEEPER' as source_system
     from {{ source('bronze', 'treatment_records') }}
     {% if is_incremental() %}
     where procedure_code in (select procedure_code from affected_keys)
        or admission_id in (select admission_id from affected_keys)
     {% endif %}
-
-),
-
-gatekeeper_treatments as (
-
-    select
-        treatment_id, admission_id, doctor_id, procedure_code,
-        treatment_date::varchar as treatment_date, cost, outcome,
-        file_name, upload_dttm, load_dttm,
-        'GATEKEEPER' as source_system
-    from {{ source('bronze', 'gk_treatment_records') }}
-    {% if is_incremental() %}
-    where procedure_code in (select procedure_code from affected_keys)
-       or admission_id in (select admission_id from affected_keys)
-    {% endif %}
-
-),
-
-source as (
-
-    select * from snowpipe_treatments
-    union all
-    select * from gatekeeper_treatments
 
 ),
 

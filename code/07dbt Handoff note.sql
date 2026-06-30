@@ -1,0 +1,46 @@
+-- ============================================================================
+-- SCRIPT 07 — HANDOFF TO dbt  (what Snowflake does NOT create, and why)
+-- ----------------------------------------------------------------------------
+-- This file has NO SQL to run. It explains the boundary between the manual
+-- Snowflake setup (scripts 01–06) and the parts dbt builds automatically.
+--
+--   ┌─────────────────────────────────────────────────────────────────────┐
+--   │  YOU (scripts 01–06)            │  dbt (runs from the project folder)  │
+--   ├─────────────────────────────────┼──────────────────────────────────────┤
+--   │  Warehouse, Database            │  STAGING views   (Silver)            │
+--   │  Schemas (RAW/STAGING/MARTS/…)  │  MARTS dims+facts (Gold)             │
+--   │  Role + grants                  │  SNAPSHOTS       (SCD2 history)      │
+--   │  S3 integration + stages        │  Seeds → RAW     (doctors/hospitals/ │
+--   │  RAW landing tables             │                   insurers)          │
+--   │  AUDIT tables                   │  All dbt tests                       │
+--   │  Email integration              │                                      │
+--   └─────────────────────────────────┴──────────────────────────────────────┘
+--
+-- WHY dbt owns Silver/Gold/Snapshots:
+--   dbt writes the SQL that builds those tables, so it must CREATE them itself.
+--   Never hand-build STAGING/MARTS/SNAPSHOTS tables — dbt does it on `dbt run`.
+--
+-- THE SEEDS (doctors, hospitals, insurers) ALSO come from dbt:
+--   They live as CSVs in the dbt project's seeds/ folder and load into RAW via
+--   `dbt seed`. Do NOT create or truncate them by hand.
+--
+-- ----------------------------------------------------------------------------
+-- ONCE SCRIPTS 01–06 ARE DONE, THE dbt SIDE IS:
+-- ----------------------------------------------------------------------------
+--   (run these in a terminal, inside the dbt project folder)
+--     dbt deps        -- install any packages
+--     dbt seed        -- load doctors/hospitals/insurers into RAW
+--     dbt run         -- build STAGING (Silver) → MARTS (Gold) → SNAPSHOTS
+--     dbt test        -- run all data quality tests
+--
+-- ----------------------------------------------------------------------------
+-- AFTER THE FIRST `dbt run`, APPLY THE GOLD STAR-SCHEMA KEYS:
+-- ----------------------------------------------------------------------------
+--   Run the separate script  add_star_schema_keys.sql  in Snowsight.
+--   It declares the 5 primary keys + 8 foreign keys so Power BI / Cortex
+--   auto-build the table relationships. Re-run it after any
+--   `dbt run --full-refresh` (a full refresh drops + recreates the tables,
+--   which clears the keys).
+--
+-- DONE — the platform is fully set up.
+-- ============================================================================

@@ -9,45 +9,25 @@
 
 -- ════════════════════════════════════════════════════════════════════
 -- stg_claims (SILVER)
--- Unions Snowpipe + Gatekeeper claims. Parses text dates (Bronze stores
--- dates as raw text; Silver converts them - medallion principle).
+-- SINGLE INGESTION PATH: Snowpipe retired. The gatekeeper validates every
+-- file and loads it into RAW.INSURANCE_CLAIMS, so this model reads ONE
+-- source table (no more Snowpipe + GK_ union). Parses text dates (Bronze
+-- stores dates as raw text; Silver converts them - medallion principle).
 -- Complex logic: dedup, status decode, settlement-time calc, approval
 -- ratio, NULL-safe financial handling, and DQ validation.
 -- ════════════════════════════════════════════════════════════════════
 
-with snowpipe_claims as (
-
-    select
-        claim_id, admission_id, insurance_id, claim_amount, approved_amount,
-        claim_status, claim_date::varchar as claim_date, settle_date::varchar as settle_date,
-        file_name, upload_dttm, load_dttm,
-        'SNOWPIPE' as source_system
-    from {{ source('bronze', 'insurance_claims') }}
-    {% if is_incremental() %}
-    where load_dttm > (select max(load_dttm) from {{ this }})
-    {% endif %}
-
-),
-
-gatekeeper_claims as (
+with source as (
 
     select
         claim_id, admission_id, insurance_id, claim_amount, approved_amount,
         claim_status, claim_date::varchar as claim_date, settle_date::varchar as settle_date,
         file_name, upload_dttm, load_dttm,
         'GATEKEEPER' as source_system
-    from {{ source('bronze', 'gk_insurance_claims') }}
+    from {{ source('bronze', 'insurance_claims') }}
     {% if is_incremental() %}
     where load_dttm > (select max(load_dttm) from {{ this }})
     {% endif %}
-
-),
-
-source as (
-
-    select * from snowpipe_claims
-    union all
-    select * from gatekeeper_claims
 
 ),
 
