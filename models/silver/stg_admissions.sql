@@ -25,7 +25,6 @@
     )
 }}
 
-
 -- Patients touched since the last run (only used on incremental runs).
 {% if is_incremental() %}
 with affected_patients as (

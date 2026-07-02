@@ -10,7 +10,8 @@ NOTE ON THE TWO GATEKEEPER EMAILS:
      AUDIT.FILE_PROCESSING_LOG + AUDIT.DQ_METRICS_LOG.
   2) DAG-FAILURE email - sent by THIS file's on_failure_callback when the
      gatekeeper TASK ITSELF crashes (Snowflake unreachable, bad key, python
-     error - not a quarantine). Now formatted + logged to AUDIT.PIPELINE_ERROR_LOG.
+     error - not a quarantine). Formatted + logged to AUDIT.PIPELINE_ERROR_LOG,
+     now including the ACTION line so the table row mirrors the email.
 """
 from datetime import datetime, timedelta
 from airflow import DAG
@@ -58,6 +59,9 @@ def send_failure_email(context):
             "Failed to trigger the downstream healthcare_pipeline transform DAG.",
     }.get(task_id, "A gatekeeper task failed.")
 
+    action_text = (f"Open Airflow > {dag_id} > {task_id} > Logs for the full error, "
+                   f"fix the issue, then re-run.")
+
     subject = f"Gatekeeper Pipeline FAILED - {task_id}"
     body = (
         f"Healthcare GATEKEEPER pipeline FAILED - ingestion halted.\n\n"
@@ -69,8 +73,7 @@ def send_failure_email(context):
         f"  Failed at:      {ts}\n\n"
         f"  What happened:\n"
         f"    - {stage_meaning}\n\n"
-        f"  Action: Open Airflow > {dag_id} > {task_id} > Logs for the full error, "
-        f"fix the issue, then re-run."
+        f"  Action: {action_text}"
     )
     safe_subject = subject.replace("'", "")
     safe_body = body.replace("'", "")
@@ -79,13 +82,13 @@ def send_failure_email(context):
         # 1) send the alert email
         s.sql("call system$send_email(?, ?, ?, ?)",
               params=["HEALTHCARE_EMAIL_INT", ALERT_EMAIL, safe_subject, safe_body]).collect()
-        # 2) write the SAME details to the permanent error-log table
+        # 2) write the SAME details to the permanent error-log table (now incl. action)
         s.sql(
             "INSERT INTO HEALTHCARE_DB.AUDIT.PIPELINE_ERROR_LOG "
-            "(dag_id, task_id, status, triggered_by, attempt, error_summary, failed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ)",
+            "(dag_id, task_id, status, triggered_by, attempt, error_summary, action, failed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ)",
             params=[dag_id, task_id, "FAILED", run_type,
-                    f"{try_no} of {max_tries}", stage_meaning]).collect()
+                    f"{try_no} of {max_tries}", stage_meaning, action_text]).collect()
         s.close()
     except Exception as e:
         print(f"failure email/log could not be written: {e}")

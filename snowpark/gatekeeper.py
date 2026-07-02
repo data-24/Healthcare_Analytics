@@ -284,11 +284,17 @@ def send_email(session, recipients, subject, body):
                     params=[COMMON["email_integration"], to, safe_subject, safe_body]).collect()
 
 
-def log_file(session, run_id, file_name, status, rows, passed, failed):
+def log_file(session, run_id, file_name, status, rows, passed, failed,
+             feed="", failed_checks="", action=""):
+    # Column list is explicit so the row mirrors the email: adds feed_type,
+    # failed_checks (same text as the quarantine email) and action.
     session.sql(
         "INSERT INTO HEALTHCARE_DB.AUDIT.FILE_PROCESSING_LOG "
-        "VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP()::TIMESTAMP_NTZ)",
-        params=[run_id, file_name, status, rows, passed, failed]).collect()
+        "(run_id, file_name, status, rows_loaded, checks_passed, checks_failed, "
+        " feed_type, failed_checks, action, processed_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP()::TIMESTAMP_NTZ)",
+        params=[run_id, file_name, status, rows, passed, failed,
+                feed, failed_checks, action]).collect()
 
 
 def log_checks(session, run_id, file_name, results):
@@ -330,9 +336,13 @@ def main():
         if gate_fail or thresh_fail:
             any_quarantined = True
             move_file(session, file_name, COMMON["quarantine_stage"])
-            log_file(session, run_id, file_name, "QUARANTINED", 0, passed_n, failed_n)
             failed_block = "\n".join([f"    - {r.check_name} [{r.tier}]: {r.detail}"
                                       for r in (gate_fail + thresh_fail)])
+            quarantine_action = ("File moved to quarantine/ folder. "
+                                 "Review and re-upload a corrected file.")
+            # Log row now mirrors the email: feed, the failed-checks text, and action.
+            log_file(session, run_id, file_name, "QUARANTINED", 0, passed_n, failed_n,
+                     feed=feed, failed_checks=failed_block, action=quarantine_action)
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             email_body = (
                 f"Healthcare GATEKEEPER validation FAILED - file quarantined.\n\n"
@@ -343,7 +353,7 @@ def main():
                 f"  Checks failed:  {failed_n}\n"
                 f"  Quarantined at: {ts}\n\n"
                 f"  Failed checks:\n{failed_block}\n\n"
-                f"  Action: File moved to quarantine/ folder. Review and re-upload a corrected file."
+                f"  Action: {quarantine_action}"
             )
             send_email(session, get_recipients(session),
                        f"GATEKEEPER QUARANTINE - {file_name}", email_body)
@@ -351,7 +361,9 @@ def main():
         else:
             rows = load_file(session, file_name, cfg)
             move_file(session, file_name, COMMON["processed_stage"])
-            log_file(session, run_id, file_name, "PASSED", rows, passed_n, failed_n)
+            log_file(session, run_id, file_name, "PASSED", rows, passed_n, failed_n,
+                     feed=feed, failed_checks="",
+                     action="Loaded successfully; file archived to processed/.")
             advisory_warn = [r for r in results if r.tier == "ADVISORY" and not r.passed]
             warn = (" (advisories: " + ", ".join(r.check_name for r in advisory_warn) + ")"
                     if advisory_warn else "")
